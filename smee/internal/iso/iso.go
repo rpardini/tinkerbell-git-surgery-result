@@ -18,8 +18,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/go-logr/logr"
-	"github.com/tinkerbell/smee/internal/dhcp/data"
-	"github.com/tinkerbell/smee/internal/iso/internal"
+	"github.com/tinkerbell/tinkerbell/pkg/data"
+	"github.com/tinkerbell/tinkerbell/smee/internal/iso/internal"
 )
 
 const (

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/tinkerbell/smee/internal/metric"
+	"github.com/tinkerbell/tinkerbell/smee/internal/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -33,12 +33,12 @@ func TestCustomScript(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			d := data{MACAddress: net.HardwareAddr{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, IPXEScript: tt.ipxeScript, IPXEScriptURL: u}
+			d := info{MACAddress: net.HardwareAddr{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, IPXEScript: tt.ipxeScript, IPXEScriptURL: u}
 			got, err := h.customScript(d)
 			if err != nil && !tt.shouldErr {
 				t.Fatal(err)
 			}
-			if diff := cmp.Diff(tt.want, got); diff != "" {
+			if diff := cmp.Diff(got, tt.want); diff != "" {
 				t.Fatal(diff)
 			}
 		})
@@ -60,7 +60,7 @@ set retry_delay:int32 3
 set idx:int32 0
 :retry_kernel
 kernel ${download-url}/${kernel} vlan_id=1234 \
-facility=onprem syslog_host= grpc_authority= tinkerbell_tls=false tinkerbell_insecure_tls=false worker_id=00:01:02:03:04:05 hw_addr=00:01:02:03:04:05 \
+facility=onprem syslog_host= grpc_authority=127.0.0.1:42113 tinkerbell_tls=false tinkerbell_insecure_tls=false worker_id=00:01:02:03:04:05 hw_addr=00:01:02:03:04:05 \
 modules=loop,squashfs,sd-mod,usb-storage intel_iommu=on iommu=pt initrd=initramfs-${arch} console=tty0 console=ttyS1,115200 && goto download_initrd || iseq ${idx} ${retries} && goto kernel-error || inc idx && echo retry in ${retry_delay} seconds ; sleep ${retry_delay} ; goto retry_kernel
 
 :download_initrd
@@ -96,17 +96,20 @@ exit
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			h := &Handler{
-				OSIEURL:              "http://127.1.1.1",
-				IPXEScriptRetries:    10,
-				IPXEScriptRetryDelay: 3,
+				OSIEURL:               "http://127.1.1.1",
+				IPXEScriptRetries:     10,
+				IPXEScriptRetryDelay:  3,
+				TinkServerTLS:         false,
+				TinkServerInsecureTLS: false,
+				TinkServerGRPCAddr:    "127.0.0.1:42113",
 			}
-			d := data{MACAddress: net.HardwareAddr{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, VLANID: "1234", Facility: "onprem", Arch: "x86_64"}
+			d := info{MACAddress: net.HardwareAddr{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, VLANID: "1234", Facility: "onprem", Arch: "x86_64"}
 			sp := trace.SpanFromContext(context.Background())
 			got, err := h.defaultScript(sp, d)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if diff := cmp.Diff(tt.want, got); diff != "" {
+			if diff := cmp.Diff(got, tt.want); diff != "" {
 				t.Log(got)
 				t.Fatal(diff)
 			}
@@ -117,6 +120,7 @@ exit
 func TestStaticScript(t *testing.T) {
 	want := `#!ipxe
 
+set syslog 127.1.1.1
 echo Loading the static Tinkerbell iPXE script...
 
 set arch ${buildarch}
