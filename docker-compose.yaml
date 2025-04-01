@@ -1,0 +1,116 @@
+# Example run command: OSIE_URL="http://192.168.2.50:8787" PARENT_INTERFACE=eno1 docker compose up
+services:
+
+  etcd:
+    image: registry.k8s.io/etcd:3.5.15-0
+    networks:
+      01-tinkerbell_default:
+    command:
+      - etcd
+      - --advertise-client-urls=http://0.0.0.0:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --data-dir=/data/tinkerbell.etcd
+    volumes:
+      - etcd:/data
+
+  kube-apiserver:
+    image: registry.k8s.io/kube-apiserver:v1.32.2
+    networks:
+      01-tinkerbell_default:
+    command:
+      - kube-apiserver
+      - --etcd-servers=http://etcd:2379
+      - --service-account-key-file=service-account-key.pem
+      - --service-account-signing-key-file=service-account-key.pem
+      - --service-account-issuer=api
+      - --tls-cert-file=server.crt
+      - --tls-private-key-file=server.key
+      - --client-ca-file=ca.crt
+    working_dir: /certs
+    ports:
+      - 6443:6443
+    volumes:
+      - certs:/certs
+    depends_on:
+      etcd:
+        condition: service_started
+      kubeconfig:
+        condition: service_completed_successfully
+
+  kube-controller-manager:
+    image: registry.k8s.io/kube-controller-manager:v1.32.2
+    networks:
+      01-tinkerbell_default:
+    command:
+      - kube-controller-manager
+      - --kubeconfig=/certs/kubeconfig
+      - --controllers=namespace-controller,garbage-collector-controller
+    working_dir: /certs
+    volumes:
+      - certs:/certs
+    depends_on:
+      etcd:
+        condition: service_started
+      kubeconfig:
+        condition: service_completed_successfully
+      kube-apiserver:
+        condition: service_started
+
+  tinkerbell:
+    #image: ghcr.io/tinkerbell/tinkerbell
+    build:
+      context: .
+      dockerfile: Dockerfile.tinkerbell
+    #network_mode: host
+    networks:
+      02-dhcp-relay:
+      01-tinkerbell_default:
+    environment:
+      TINKERBELL_BACKEND_KUBE_CONFIG: /certs/kubeconfig
+      TINKERBELL_IPXE_HTTP_SCRIPT_OSIE_URL: ${OSIE_URL:?Error:"OSIE_URL env var is not set"}
+      TINKERBELL_IPXE_HTTP_SCRIPT_EXTRA_KERNEL_ARGS: "tink_worker_image=ghcr.io/tinkerbell/tink-agent"
+      TINKERBELL_PUBLIC_IPV4: 192.168.2.50
+      TINKERBELL_ENABLE_EMBEDDED_ETCD: "false"
+      TINKERBELL_ENABLE_EMBEDDED_KUBE_APISERVER: "false"
+    volumes:
+      - certs:/certs
+    restart: on-failure
+    ports:
+      - 42113:42113
+      - 50061:50061
+      - 514:514/udp
+      - 69:69/udp
+      - 67:67/udp
+      - 7171:7171
+      - 2222:2222
+    depends_on:
+      kubeconfig:
+        condition: service_completed_successfully
+
+  kubeconfig:
+    image: bitnami/kubectl:1.30.4
+    entrypoint: /bin/sh
+    user: root
+    command: |
+      -c '/certs.sh -d /certs -i kube-apiserver && cp -a /certs/kubeconfig.localhost /kubeconfiglocal/kubeconfig'
+    volumes:
+      - certs:/certs
+      - ./script/certs.sh:/certs.sh
+      - ./out:/kubeconfiglocal
+
+volumes:
+  certs:
+  etcd:
+
+# use a custom network configuration to enable macvlan mode so we can listen for broadcast DHCP packets
+networks:
+  01-tinkerbell_default:
+    driver: bridge
+  02-dhcp-relay:
+    driver: macvlan
+    driver_opts:
+      parent: ${PARENT_INTERFACE:?Error:"PARENT_INTERFACE env var must be set to the interface name to use for DHCP broadcast traffic"}
+    ipam:
+      driver: default
+      config:
+        - subnet: 192.168.99.0/30

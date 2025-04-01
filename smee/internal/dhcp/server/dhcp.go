@@ -8,15 +8,14 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/dhcpv4/server4"
-	"github.com/tinkerbell/smee/internal/dhcp/data"
+	dp "github.com/tinkerbell/tinkerbell/smee/internal/dhcp"
 	"golang.org/x/net/ipv4"
 )
 
-// Handler is a type that defines the handler function to be called every time a
-// valid DHCPv4 message is received
-// type Handler func(ctx context.Context, conn net.PacketConn, d data.Packet).
+// Handler is a type that defines the handler function to be called every time a valid DHCPv4 message is received
+// Alternative: type Handler func(ctx context.Context, conn net.PacketConn, d data.Packet).
 type Handler interface {
-	Handle(ctx context.Context, conn *ipv4.PacketConn, d data.Packet)
+	Handle(ctx context.Context, conn *ipv4.PacketConn, d dp.Packet)
 }
 
 // DHCP represents a DHCPv4 server object.
@@ -32,7 +31,7 @@ func (s *DHCP) Serve(ctx context.Context) error {
 		<-ctx.Done()
 		_ = s.Close()
 	}()
-	s.Logger.Info("Server listening on", "addr", s.Conn.LocalAddr())
+	s.Logger.V(1).Info("Server listening on", "addr", s.Conn.LocalAddr())
 
 	nConn := ipv4.NewPacketConn(s.Conn)
 	if err := nConn.SetControlMessage(ipv4.FlagInterface, true); err != nil {
@@ -83,7 +82,7 @@ func (s *DHCP) Serve(ctx context.Context) error {
 		}
 
 		for _, handler := range s.Handlers {
-			go handler.Handle(ctx, nConn, data.Packet{Peer: upeer, Pkt: m, Md: &data.Metadata{IfName: ifName, IfIndex: cm.IfIndex}})
+			go handler.Handle(ctx, nConn, dp.Packet{Peer: upeer, Pkt: m, Md: &dp.Metadata{IfName: ifName, IfIndex: cm.IfIndex}})
 		}
 	}
 }

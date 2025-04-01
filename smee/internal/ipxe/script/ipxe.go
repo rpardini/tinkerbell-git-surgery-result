@@ -11,16 +11,26 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tinkerbell/smee/internal/dhcp/handler"
-	"github.com/tinkerbell/smee/internal/metric"
+	"github.com/tinkerbell/tinkerbell/pkg/data"
+	"github.com/tinkerbell/tinkerbell/smee/internal/metric"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
+// BackendReader is the interface for getting data from a backend.
+//
+// Backends implement this interface to provide DHCP and Netboot data to the handlers.
+type BackendReader interface {
+	// Read data (from a backend) based on a mac address
+	// and return DHCP headers and options, including netboot info.
+	GetByMac(context.Context, net.HardwareAddr) (*data.DHCP, *data.Netboot, error)
+	GetByIP(context.Context, net.IP) (*data.DHCP, *data.Netboot, error)
+}
+
 type Handler struct {
 	Logger                logr.Logger
-	Backend               handler.BackendReader
+	Backend               BackendReader
 	OSIEURL               string
 	ExtraKernelParams     []string
 	PublicSyslogFQDN      string
@@ -32,7 +42,7 @@ type Handler struct {
 	StaticIPXEEnabled     bool
 }
 
-type data struct {
+type info struct {
 	AllowNetboot  bool // If true, the client will be provided netboot options in the DHCP offer/ack.
 	Console       string
 	MACAddress    net.HardwareAddr
@@ -55,18 +65,18 @@ type OSIE struct {
 	Initrd string
 }
 
-// getByMac uses the handler.BackendReader to get the (hardware) data and then
+// getByMac uses the BackendReader to get the (hardware) data and then
 // translates it to the script.Data struct.
-func getByMac(ctx context.Context, mac net.HardwareAddr, br handler.BackendReader) (data, error) {
+func getByMac(ctx context.Context, mac net.HardwareAddr, br BackendReader) (info, error) {
 	if br == nil {
-		return data{}, errors.New("backend is nil")
+		return info{}, errors.New("backend is nil")
 	}
 	d, n, err := br.GetByMac(ctx, mac)
 	if err != nil {
-		return data{}, err
+		return info{}, err
 	}
 
-	return data{
+	return info{
 		AllowNetboot:  n.AllowNetboot,
 		Console:       "",
 		MACAddress:    d.MACAddress,
@@ -80,16 +90,16 @@ func getByMac(ctx context.Context, mac net.HardwareAddr, br handler.BackendReade
 	}, nil
 }
 
-func getByIP(ctx context.Context, ip net.IP, br handler.BackendReader) (data, error) {
+func getByIP(ctx context.Context, ip net.IP, br BackendReader) (info, error) {
 	if br == nil {
-		return data{}, errors.New("backend is nil")
+		return info{}, errors.New("backend is nil")
 	}
 	d, n, err := br.GetByIP(ctx, ip)
 	if err != nil {
-		return data{}, err
+		return info{}, err
 	}
 
-	return data{
+	return info{
 		AllowNetboot:  n.AllowNetboot,
 		Console:       "",
 		MACAddress:    d.MACAddress,
@@ -134,7 +144,7 @@ func (h *Handler) HandlerFunc() http.HandlerFunc {
 		if ha, err := getMAC(r.URL.Path); err == nil {
 			hw, err := getByMac(ctx, ha, h.Backend)
 			if err != nil && h.StaticIPXEEnabled {
-				h.Logger.Info("serving static ipxe script", "mac", ha, "error", err)
+				h.Logger.Info("serving static ipxe script", "mac", ha.String(), "reasonForStaticScript", err)
 				h.serveStaticIPXEScript(w)
 				return
 			}
@@ -178,6 +188,8 @@ func (h *Handler) serveStaticIPXEScript(w http.ResponseWriter) {
 		SyslogHost:        h.PublicSyslogFQDN,
 		TinkerbellTLS:     h.TinkServerTLS,
 		TinkGRPCAuthority: h.TinkServerGRPCAddr,
+		Retries:           h.IPXEScriptRetries,
+		RetryDelay:        h.IPXEScriptRetryDelay,
 	}
 	script, err := GenerateTemplate(auto, StaticScript)
 	if err != nil {
@@ -212,7 +224,7 @@ func getMAC(urlPath string) (net.HardwareAddr, error) {
 	return ha, nil
 }
 
-func (h *Handler) serveBootScript(ctx context.Context, w http.ResponseWriter, name string, hw data) {
+func (h *Handler) serveBootScript(ctx context.Context, w http.ResponseWriter, name string, hw info) {
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(attribute.String("smee.script_name", name))
 	var script []byte
@@ -259,7 +271,7 @@ func (h *Handler) serveBootScript(ctx context.Context, w http.ResponseWriter, na
 	}
 }
 
-func (h *Handler) defaultScript(span trace.Span, hw data) (string, error) {
+func (h *Handler) defaultScript(span trace.Span, hw info) (string, error) {
 	mac := hw.MACAddress
 	arch := hw.Arch
 	if arch == "" {
@@ -296,24 +308,24 @@ func (h *Handler) defaultScript(span trace.Span, hw data) (string, error) {
 	if hw.OSIE.Initrd != "" {
 		auto.Initrd = hw.OSIE.Initrd
 	}
-	if sc := span.SpanContext(); sc.IsSampled() {
-		auto.TraceID = sc.TraceID().String()
+	if span.SpanContext().IsSampled() {
+		auto.TraceID = span.SpanContext().TraceID().String()
 	}
 
 	return GenerateTemplate(auto, HookScript)
 }
 
 // customScript returns the custom script or chain URL if defined in the hardware data otherwise an error.
-func (h *Handler) customScript(hw data) (string, error) {
-	if chain := hw.IPXEScriptURL; chain != nil && chain.String() != "" {
-		if chain.Scheme != "http" && chain.Scheme != "https" {
-			return "", fmt.Errorf("invalid URL scheme: %v", chain.Scheme)
+func (h *Handler) customScript(hw info) (string, error) {
+	if hw.IPXEScriptURL != nil && hw.IPXEScriptURL.String() != "" {
+		if hw.IPXEScriptURL.Scheme != "http" && hw.IPXEScriptURL.Scheme != "https" {
+			return "", fmt.Errorf("invalid URL scheme: %v", hw.IPXEScriptURL.Scheme)
 		}
-		c := Custom{Chain: chain}
+		c := Custom{Chain: hw.IPXEScriptURL}
 		return GenerateTemplate(c, CustomScript)
 	}
-	if script := hw.IPXEScript; script != "" {
-		c := Custom{Script: script}
+	if hw.IPXEScript != "" {
+		c := Custom{Script: hw.IPXEScript}
 		return GenerateTemplate(c, CustomScript)
 	}
 

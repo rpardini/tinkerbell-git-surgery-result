@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"net/url"
@@ -12,14 +12,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-logr/stdr"
+	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/iana"
 	"github.com/insomniacslk/dhcp/rfc1035label"
-	"github.com/tinkerbell/smee/internal/dhcp/data"
-	"github.com/tinkerbell/smee/internal/dhcp/otel"
+	"github.com/tinkerbell/tinkerbell/pkg/data"
+	"github.com/tinkerbell/tinkerbell/smee/internal/dhcp"
+	"github.com/tinkerbell/tinkerbell/smee/internal/dhcp/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/nettest"
@@ -329,13 +330,15 @@ func TestHandle(t *testing.T) {
 			}
 
 			con := ipv4.NewPacketConn(conn)
-			con.SetControlMessage(ipv4.FlagInterface, true)
+			if err := con.SetControlMessage(ipv4.FlagInterface, true); err != nil {
+				t.Fatal(err)
+			}
 
 			n, err := net.InterfaceByName("lo")
 			if err != nil {
 				t.Fatal(err)
 			}
-			s.Handle(context.Background(), con, data.Packet{Peer: peer, Pkt: tt.req, Md: &data.Metadata{IfName: n.Name, IfIndex: n.Index}})
+			s.Handle(context.Background(), con, dhcp.Packet{Peer: peer, Pkt: tt.req, Md: &dhcp.Metadata{IfName: n.Name, IfIndex: n.Index}})
 
 			msg, err := client(pc)
 			if !errors.Is(err, tt.wantErr) {
@@ -351,7 +354,9 @@ func TestHandle(t *testing.T) {
 
 func client(pc net.PacketConn) (*dhcpv4.DHCPv4, error) {
 	buf := make([]byte, 1024)
-	pc.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
+	if err := pc.SetReadDeadline(time.Now().Add(time.Millisecond * 100)); err != nil {
+		return nil, err
+	}
 	if _, _, err := pc.ReadFrom(buf); err != nil {
 		return nil, errBadBackend
 	}
@@ -416,7 +421,7 @@ func TestUpdateMsg(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			s := &Handler{
-				Log:    stdr.New(log.New(os.Stdout, "", log.Lshortfile)),
+				Log:    logr.FromSlogHandler(slog.NewJSONHandler(os.Stdout, nil)),
 				IPAddr: netip.MustParseAddr("127.0.0.1"),
 				Netboot: Netboot{
 					Enabled: true,
@@ -486,7 +491,7 @@ func TestReadBackend(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			s := &Handler{
-				Log:    stdr.New(log.New(os.Stdout, "", log.Lshortfile)),
+				Log:    logr.FromSlogHandler(slog.NewJSONHandler(os.Stdout, nil)),
 				IPAddr: netip.MustParseAddr("127.0.0.1"),
 				Netboot: Netboot{
 					Enabled: true,
@@ -534,8 +539,7 @@ func TestEncodeToAttributes(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			stdr.SetVerbosity(1)
-			s := &Handler{Log: stdr.New(log.New(os.Stdout, "", log.Lshortfile))}
+			s := &Handler{Log: logr.FromSlogHandler(slog.NewJSONHandler(os.Stdout, nil))}
 			kvs := s.encodeToAttributes(tt.input, "testing")
 			got := attribute.NewSet(kvs...)
 			want := attribute.NewSet(tt.want...)

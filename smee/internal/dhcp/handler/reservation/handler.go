@@ -8,9 +8,9 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/tinkerbell/smee/internal/dhcp"
-	"github.com/tinkerbell/smee/internal/dhcp/data"
-	oteldhcp "github.com/tinkerbell/smee/internal/dhcp/otel"
+	"github.com/tinkerbell/tinkerbell/pkg/data"
+	"github.com/tinkerbell/tinkerbell/smee/internal/dhcp"
+	oteldhcp "github.com/tinkerbell/tinkerbell/smee/internal/dhcp/otel"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -23,16 +23,13 @@ const tracerName = "github.com/tinkerbell/smee"
 // setDefaults will update the Handler struct to have default values so as
 // to avoid panic for nil pointers and such.
 func (h *Handler) setDefaults() {
-	if h.Backend == nil {
-		h.Backend = noop{}
-	}
 	if h.Log.GetSink() == nil {
 		h.Log = logr.Discard()
 	}
 }
 
 // Handle responds to DHCP messages with DHCP server options.
-func (h *Handler) Handle(ctx context.Context, conn *ipv4.PacketConn, p data.Packet) {
+func (h *Handler) Handle(ctx context.Context, conn *ipv4.PacketConn, p dhcp.Packet) {
 	h.setDefaults()
 	if p.Pkt == nil {
 		h.Log.Error(errors.New("incoming packet is nil"), "not able to respond when the incoming packet is nil")
